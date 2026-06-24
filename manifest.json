@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Flickr Follow Gallery",
+  "description": "Turns Flickr followed-people feeds into a full-width photography gallery.",
+  "version": "1.0.0",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.flickr.com/*",
+    "https://flickr.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.flickr.com/*",
+        "https://flickr.com/*"
+      ],
+      "css": [
+        "gallery.css"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Flickr Follow Gallery"
+  }
+}
