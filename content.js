@@ -23,6 +23,8 @@
     subtitle: null,
     launcher: null,
     wrap: null,
+    detailQueue: [],
+    detailActive: 0,
     detailRequests: new Set(),
     renderTimer: 0,
     scanTimer: 0,
@@ -186,7 +188,10 @@
   }
 
   function scanPage({ reset = false } = {}) {
-    if (reset) state.photos.clear();
+    if (reset) {
+      state.photos.clear();
+      state.detailQueue = [];
+    }
 
     getScanRoots().forEach((root) => {
       root.querySelectorAll("img").forEach((img) => {
@@ -370,7 +375,7 @@
       anchor && anchor.getAttribute("aria-label"),
       anchor && anchor.getAttribute("title"),
       card && card.getAttribute("aria-label")
-    ].map(cleanText).map(stripFlickrChromeText);
+    ].map(cleanText);
 
     let title = "";
     let author = "";
@@ -407,8 +412,7 @@
 
     const labeledAuthor = Array.from(card.querySelectorAll("[aria-label], [title]"))
       .map((node) => cleanText(node.getAttribute("aria-label")) || cleanText(node.getAttribute("title")))
-      .map(stripFlickrChromeText)
-      .map((text) => splitTitleAndAuthor(text).author || text)
+      .map((text) => splitTitleAndAuthor(text).author || stripFlickrChromeText(text))
       .find(isUsefulAuthor);
     if (labeledAuthor) return labeledAuthor;
 
@@ -455,7 +459,7 @@
       };
     }
 
-    return { title: text, author: "" };
+    return { title: stripFlickrChromeText(text), author: "" };
   }
 
   function isUsefulTitle(text) {
@@ -563,9 +567,25 @@
       if (!photo.page || photo.detailsLoaded || state.detailRequests.has(photo.key)) return;
 
       state.detailRequests.add(photo.key);
+      state.detailQueue.push(photo.key);
+    });
+    pumpDetailQueue();
+  }
+
+  function pumpDetailQueue() {
+    const maxConcurrentDetails = 4;
+    while (state.detailActive < maxConcurrentDetails && state.detailQueue.length) {
+      const key = state.detailQueue.shift();
+      const photo = state.photos.get(key);
+      if (!photo || photo.detailsLoaded) {
+        state.detailRequests.delete(key);
+        continue;
+      }
+
+      state.detailActive += 1;
       fetchPhotoDetails(photo)
         .then((details) => {
-          const current = state.photos.get(photo.key);
+          const current = state.photos.get(key);
           if (!current) return;
 
           current.exif = details.exif || current.exif || "";
@@ -573,11 +593,15 @@
           renderSoon();
         })
         .catch(() => {
-          const current = state.photos.get(photo.key);
+          const current = state.photos.get(key);
           if (current) current.detailsLoaded = true;
         })
-        .finally(() => state.detailRequests.delete(photo.key));
-    });
+        .finally(() => {
+          state.detailActive = Math.max(0, state.detailActive - 1);
+          state.detailRequests.delete(key);
+          pumpDetailQueue();
+        });
+    }
   }
 
   async function fetchPhotoDetails(photo) {
