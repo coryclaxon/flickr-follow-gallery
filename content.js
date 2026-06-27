@@ -20,9 +20,11 @@
     photos: new Map(),
     shell: null,
     grid: null,
+    lightbox: null,
     subtitle: null,
     launcher: null,
     wrap: null,
+    activePhotoKey: "",
     detailQueue: [],
     detailActive: 0,
     detailRequests: new Set(),
@@ -97,10 +99,33 @@
       <main class="ffg-gallery-wrap">
         <div class="ffg-grid"></div>
       </main>
+      <section class="ffg-lightbox" hidden aria-label="Photo viewer">
+        <button class="ffg-lightbox-close" type="button" data-lightbox-action="close" aria-label="Close viewer">Close</button>
+        <button class="ffg-lightbox-nav ffg-lightbox-prev" type="button" data-lightbox-action="prev" aria-label="Previous photo">Prev</button>
+        <figure class="ffg-lightbox-figure">
+          <img class="ffg-lightbox-image" alt="">
+        </figure>
+        <aside class="ffg-lightbox-info">
+          <div>
+            <p class="ffg-info-kicker">Photo details</p>
+            <h2 class="ffg-info-title"></h2>
+            <p class="ffg-info-author"></p>
+          </div>
+          <dl class="ffg-info-list">
+            <div data-info-row="exif">
+              <dt>Camera</dt>
+              <dd class="ffg-info-exif"></dd>
+            </div>
+          </dl>
+          <a class="ffg-info-open" target="_blank" rel="noreferrer">Open on Flickr</a>
+        </aside>
+        <button class="ffg-lightbox-nav ffg-lightbox-next" type="button" data-lightbox-action="next" aria-label="Next photo">Next</button>
+      </section>
     `;
 
     document.documentElement.appendChild(state.shell);
     state.grid = state.shell.querySelector(".ffg-grid");
+    state.lightbox = state.shell.querySelector(".ffg-lightbox");
     state.wrap = state.shell.querySelector(".ffg-gallery-wrap");
     state.subtitle = state.shell.querySelector(".ffg-subtitle");
 
@@ -124,6 +149,7 @@
     });
 
     state.shell.querySelector('[data-action="close"]').addEventListener("click", closeGallery);
+    state.lightbox.addEventListener("click", handleLightboxClick);
     state.wrap.addEventListener("scroll", maybeLoadMore);
     window.addEventListener("keydown", handleKeys, true);
     applyOptions();
@@ -148,6 +174,7 @@
   }
 
   function closeGallery() {
+    closeLightbox();
     state.shell.hidden = true;
     document.documentElement.classList.remove("ffg-active");
     document.body.classList.remove("ffg-active");
@@ -157,7 +184,19 @@
     if (!state.shell || state.shell.hidden) return;
     if (event.key === "Escape") {
       event.preventDefault();
+      if (!state.lightbox.hidden) {
+        closeLightbox();
+        return;
+      }
       closeGallery();
+    }
+    if (!state.lightbox.hidden && event.key === "ArrowLeft") {
+      event.preventDefault();
+      showAdjacentPhoto(-1);
+    }
+    if (!state.lightbox.hidden && event.key === "ArrowRight") {
+      event.preventDefault();
+      showAdjacentPhoto(1);
     }
     if (event.key.toLowerCase() === "m") {
       event.preventDefault();
@@ -530,6 +569,18 @@
   function createCard(photo) {
     const card = document.createElement("figure");
     card.className = "ffg-card";
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.setAttribute("aria-label", photo.title ? `Open ${photo.title}` : "Open Flickr photo");
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return;
+      openLightbox(photo.key);
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openLightbox(photo.key);
+    });
 
     const img = document.createElement("img");
     img.loading = "lazy";
@@ -562,6 +613,62 @@
     return card;
   }
 
+  function handleLightboxClick(event) {
+    const action = event.target.closest("[data-lightbox-action]");
+    if (action) {
+      const type = action.getAttribute("data-lightbox-action");
+      if (type === "close") closeLightbox();
+      if (type === "prev") showAdjacentPhoto(-1);
+      if (type === "next") showAdjacentPhoto(1);
+      return;
+    }
+
+    if (event.target === state.lightbox) closeLightbox();
+  }
+
+  function openLightbox(key) {
+    const photo = state.photos.get(key);
+    if (!photo) return;
+
+    state.activePhotoKey = key;
+    updateLightbox(photo);
+    state.lightbox.hidden = false;
+    state.lightbox.querySelector('[data-lightbox-action="close"]').focus();
+  }
+
+  function closeLightbox() {
+    if (!state.lightbox) return;
+    state.lightbox.hidden = true;
+    state.activePhotoKey = "";
+  }
+
+  function showAdjacentPhoto(direction) {
+    const photos = Array.from(state.photos.values());
+    if (!photos.length || !state.activePhotoKey) return;
+
+    const currentIndex = Math.max(0, photos.findIndex((photo) => photo.key === state.activePhotoKey));
+    const nextIndex = (currentIndex + direction + photos.length) % photos.length;
+    openLightbox(photos[nextIndex].key);
+  }
+
+  function updateLightbox(photo) {
+    const image = state.lightbox.querySelector(".ffg-lightbox-image");
+    const title = state.lightbox.querySelector(".ffg-info-title");
+    const author = state.lightbox.querySelector(".ffg-info-author");
+    const exif = state.lightbox.querySelector(".ffg-info-exif");
+    const exifRow = state.lightbox.querySelector('[data-info-row="exif"]');
+    const open = state.lightbox.querySelector(".ffg-info-open");
+
+    image.src = photo.src;
+    image.alt = photo.title || "Flickr photo";
+    title.textContent = photo.title || "Untitled";
+    author.textContent = photo.author || authorFromPhotoHref(photo.page) || "";
+    author.hidden = !author.textContent;
+    exif.textContent = photo.exif || (photo.detailsLoaded ? "No camera details found" : "Loading camera details...");
+    exifRow.hidden = false;
+    open.href = photo.page;
+  }
+
   function schedulePhotoDetails(photos) {
     photos.slice(0, 80).forEach((photo) => {
       if (!photo.page || photo.detailsLoaded || state.detailRequests.has(photo.key)) return;
@@ -590,11 +697,15 @@
 
           current.exif = details.exif || current.exif || "";
           current.detailsLoaded = true;
+          if (current.key === state.activePhotoKey && !state.lightbox.hidden) updateLightbox(current);
           renderSoon();
         })
         .catch(() => {
           const current = state.photos.get(key);
-          if (current) current.detailsLoaded = true;
+          if (current) {
+            current.detailsLoaded = true;
+            if (current.key === state.activePhotoKey && !state.lightbox.hidden) updateLightbox(current);
+          }
         })
         .finally(() => {
           state.detailActive = Math.max(0, state.detailActive - 1);

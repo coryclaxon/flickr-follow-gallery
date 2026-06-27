@@ -8,6 +8,7 @@ An unpacked Chrome/Brave extension that turns Flickr feed pages into a full-widt
 - Automatically opens on likely feed pages such as `/photos/friends` and `/activity`.
 - Collects large Flickr photo images that are already loaded in your signed-in browser tab.
 - Displays them in a dark, full-width masonry gallery with hover captions, camera/EXIF details when Flickr exposes them, and direct photo links.
+- Opens a lightbox viewer with a photo detail sidebar when you click a gallery image.
 - Watches the page as you scroll so newly loaded feed photos are added to the gallery.
 - Keeps your Flickr API keys, password, and account tokens out of the extension. It only reads the signed-in page you already opened.
 
@@ -24,6 +25,8 @@ An unpacked Chrome/Brave extension that turns Flickr feed pages into a full-widt
 - Click **Open gallery** if it does not open automatically.
 - Use **Compact**, **Balanced**, or **Spacious** to change the column size.
 - Use **Metadata** to keep captions visible.
+- Click a photo to open the lightbox viewer.
+- Use `←` and `→` in the lightbox to move between photos.
 - Press `Esc` to close the gallery.
 - Press `M` while the gallery is open to toggle metadata.
 
