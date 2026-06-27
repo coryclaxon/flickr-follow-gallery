@@ -289,10 +289,32 @@
       src: existing.src || incoming.src,
       page: existing.page || incoming.page,
       title: existing.title || incoming.title,
-      author: existing.author || incoming.author,
+      author: bestAuthor(existing.author, incoming.author),
       exif: existing.exif || incoming.exif || "",
       detailsLoaded: existing.detailsLoaded || incoming.detailsLoaded || false
     };
+  }
+
+  function bestAuthor(existing, incoming) {
+    const current = cleanText(existing);
+    const next = cleanText(incoming);
+    if (!current) return next;
+    if (!next) return current;
+    if (looksLikeNsid(current) && !looksLikeNsid(next)) return next;
+    return current;
+  }
+
+  function bestTitle(existing, incoming) {
+    const current = cleanText(existing);
+    const next = cleanText(incoming);
+    if (!current) return next;
+    if (!next) return current;
+    if (/^(photo|open|view|untitled|feed placeholder)$/i.test(current)) return next;
+    return next.length > 2 && !sameText(current, next) ? next : current;
+  }
+
+  function looksLikeNsid(value) {
+    return /^\d+@N\d+$/i.test(cleanText(value));
   }
 
   function bestImageUrl(img) {
@@ -695,6 +717,8 @@
           const current = state.photos.get(key);
           if (!current) return;
 
+          current.title = bestTitle(current.title, details.title || "");
+          current.author = bestAuthor(current.author, details.author || "");
           current.exif = details.exif || current.exif || "";
           current.detailsLoaded = true;
           if (current.key === state.activePhotoKey && !state.lightbox.hidden) updateLightbox(current);
@@ -720,6 +744,7 @@
     if (!/(^|\.)flickr\.com$/i.test(url.hostname)) return { exif: "" };
 
     const urls = [buildMetaUrl(url), url.href].filter(Boolean);
+    const combined = { exif: "", title: "", author: "" };
     for (const href of urls) {
       const response = await fetch(href, {
         credentials: "include",
@@ -730,11 +755,16 @@
 
       const html = await response.text();
       const doc = new DOMParser().parseFromString(html, "text/html");
-      const exif = extractExifSummary(doc);
-      if (exif) return { exif };
+      const details = extractPhotoPageDetails(doc, html, url);
+      combined.exif ||= details.exif || "";
+      combined.title = bestTitle(combined.title, details.title || "");
+      combined.author = bestAuthor(combined.author, details.author || "");
+
+      if (combined.exif && combined.title && combined.author && !looksLikeNsid(combined.author)) break;
     }
 
-    return { exif: "" };
+    combined.author = bestAuthor(combined.author, authorFromPhotoHref(url.href));
+    return combined;
   }
 
   function buildMetaUrl(url) {
@@ -746,6 +776,198 @@
     metaUrl.search = "";
     metaUrl.hash = "";
     return metaUrl.href;
+  }
+
+  function extractPhotoPageDetails(doc, html, photoUrl) {
+    const jsonDetails = extractJsonDetails(doc, html);
+    const metaDetails = extractMetaDetails(doc);
+    const exif = extractExifSummary(doc) || jsonDetails.exif || "";
+
+    return {
+      title: metaDetails.title || jsonDetails.title || "",
+      author: metaDetails.author || jsonDetails.author || authorFromPhotoHref(photoUrl.href),
+      exif
+    };
+  }
+
+  function extractMetaDetails(doc) {
+    const titleCandidates = [
+      getMetaContent(doc, 'meta[property="og:title"]'),
+      getMetaContent(doc, 'meta[name="twitter:title"]'),
+      getMetaContent(doc, 'meta[name="title"]'),
+      doc.querySelector("h1") && doc.querySelector("h1").textContent,
+      doc.title
+    ];
+
+    const authorCandidates = [
+      getMetaContent(doc, 'meta[name="author"]'),
+      getMetaContent(doc, 'meta[property="article:author"]'),
+      getMetaContent(doc, 'meta[name="twitter:creator"]'),
+      getMetaContent(doc, 'meta[property="og:site_name"]')
+    ];
+
+    return {
+      title: titleCandidates.map(cleanPageTitle).find(isUsefulTitle) || "",
+      author: authorCandidates.map(cleanAuthorText).find(isUsefulAuthor) || ""
+    };
+  }
+
+  function getMetaContent(doc, selector) {
+    return cleanText(doc.querySelector(selector) && doc.querySelector(selector).getAttribute("content"));
+  }
+
+  function cleanPageTitle(value) {
+    return stripFlickrChromeText(cleanText(value)
+      .replace(/\s*\|\s*Flickr\s*$/i, "")
+      .replace(/\s*-\s*Flickr\s*$/i, ""));
+  }
+
+  function cleanAuthorText(value) {
+    return stripFlickrChromeText(cleanText(value)
+      .replace(/^@\s*/, "")
+      .replace(/\s*\|\s*Flickr\s*$/i, "")
+      .replace(/\s*-\s*Flickr\s*$/i, ""));
+  }
+
+  function extractJsonDetails(doc, html) {
+    const jsonLdDetails = extractJsonLdDetails(doc);
+    const scriptText = Array.from(doc.querySelectorAll("script"))
+      .map((script) => script.textContent || "")
+      .join("\n");
+
+    const title = jsonLdDetails.title || findJsonString(scriptText, [
+      "title",
+      "photoTitle",
+      "name"
+    ]);
+    const author = jsonLdDetails.author || findJsonString(scriptText, [
+      "ownerName",
+      "ownername",
+      "displayName",
+      "realname",
+      "username",
+      "pathAlias",
+      "path_alias"
+    ]);
+
+    const make = findJsonString(scriptText, ["cameraMake", "camera_make", "make"]);
+    const model = findJsonString(scriptText, ["cameraModel", "camera_model", "model"]);
+    const exposure = findJsonString(scriptText, ["exposureTime", "exposure_time", "shutterSpeed", "shutter_speed", "exposure"]);
+    const aperture = findJsonString(scriptText, ["aperture", "fNumber", "f_number", "fstop"]);
+    const iso = findJsonString(scriptText, ["iso", "isoSpeed", "iso_speed"]);
+    const focal = findJsonString(scriptText, ["focalLength", "focal_length"]);
+
+    const exif = formatExifSummary(make, model, exposure, aperture, iso, focal);
+
+    return {
+      title: cleanPageTitle(title),
+      author: cleanAuthorText(author),
+      exif: exif || extractExifFromRawHtml(html)
+    };
+  }
+
+  function extractJsonLdDetails(doc) {
+    const details = { title: "", author: "" };
+    const scripts = Array.from(doc.querySelectorAll('script[type="application/ld+json"]'));
+
+    for (const script of scripts) {
+      try {
+        const parsed = JSON.parse(script.textContent || "null");
+        const nodes = Array.isArray(parsed) ? parsed : [parsed];
+        for (const node of nodes) {
+          const found = findJsonLdPhotoNode(node);
+          if (!found) continue;
+          details.title ||= cleanText(found.name || found.headline || found.caption || "");
+          details.author ||= cleanText(authorNameFromJson(found.author || found.creator || found.accountablePerson));
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return details;
+  }
+
+  function findJsonLdPhotoNode(value) {
+    if (!value || typeof value !== "object") return null;
+    const type = Array.isArray(value["@type"]) ? value["@type"].join(" ") : String(value["@type"] || "");
+    if (/photograph|imageobject|creativework/i.test(type)) return value;
+
+    for (const child of Object.values(value)) {
+      if (Array.isArray(child)) {
+        for (const item of child) {
+          const found = findJsonLdPhotoNode(item);
+          if (found) return found;
+        }
+      } else if (child && typeof child === "object") {
+        const found = findJsonLdPhotoNode(child);
+        if (found) return found;
+      }
+    }
+
+    return null;
+  }
+
+  function authorNameFromJson(value) {
+    if (!value) return "";
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return authorNameFromJson(value[0]);
+    return value.name || value.alternateName || value.username || "";
+  }
+
+  function findJsonString(text, keys) {
+    for (const key of keys) {
+      const escaped = escapeRegExp(key);
+      const patterns = [
+        new RegExp(`["']${escaped}["']\\s*:\\s*["']([^"']{1,160})["']`, "i"),
+        new RegExp(`\\b${escaped}\\b\\s*[:=]\\s*["']([^"']{1,160})["']`, "i")
+      ];
+
+      for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match) {
+          const value = decodeHtmlEntities(match[1]);
+          if (isPlausibleMetadataText(value)) return value;
+        }
+      }
+    }
+
+    return "";
+  }
+
+  function isPlausibleMetadataText(value) {
+    const text = cleanText(value);
+    if (!text || text.length > 160) return false;
+    if (/\b(?:true|false|null|undefined|enable|debug|eviction|feature|experiment)\b/i.test(text)) return false;
+    return !/[{}[\]]/.test(text);
+  }
+
+  function decodeHtmlEntities(value) {
+    const textarea = document.createElement("textarea");
+    textarea.innerHTML = String(value || "");
+    return textarea.value;
+  }
+
+  function extractExifFromRawHtml(html) {
+    const make = findRawExifValue(html, ["Camera Make", "Make", "cameraMake", "camera_make"]);
+    const model = findRawExifValue(html, ["Camera Model", "Model", "cameraModel", "camera_model"]);
+    const exposure = findRawExifValue(html, ["Exposure Time", "Exposure", "Shutter Speed", "exposureTime", "exposure_time", "shutterSpeed", "shutter_speed"]);
+    const aperture = findRawExifValue(html, ["Aperture", "F Number", "F-Number", "aperture", "fNumber", "f_number"]);
+    const iso = findRawExifValue(html, ["ISO", "ISO Speed", "iso", "isoSpeed", "iso_speed"]);
+    const focal = findRawExifValue(html, ["Focal Length", "focalLength", "focal_length"]);
+    return formatExifSummary(make, model, exposure, aperture, iso, focal);
+  }
+
+  function findRawExifValue(html, labels) {
+    for (const label of labels) {
+      const escaped = escapeRegExp(label);
+      const quoted = html.match(new RegExp(`["']${escaped}["']\\s*:\\s*["']([^"']{1,80})["']`, "i"));
+      if (quoted && isPlausibleExifValue(quoted[1])) return decodeHtmlEntities(quoted[1]);
+
+      const tableish = html.match(new RegExp(`>${escaped}<[^>]*>\\s*<[^>]+>\\s*([^<]{1,80})<`, "i"));
+      if (tableish && isPlausibleExifValue(tableish[1])) return decodeHtmlEntities(tableish[1]);
+    }
+    return "";
   }
 
   function extractExifSummary(doc) {
@@ -762,15 +984,7 @@
     const iso = findExifValue(text, ["ISO", "ISO Speed"]);
     const focal = findExifValue(text, ["Focal Length"]);
 
-    const camera = formatCamera(make, model);
-    const settings = [
-      formatExposure(exposure),
-      formatAperture(aperture),
-      formatIso(iso),
-      formatFocalLength(focal)
-    ].filter(Boolean);
-
-    return [camera, ...settings].filter(Boolean).join(" \u00b7 ");
+    return formatExifSummary(make, model, exposure, aperture, iso, focal);
   }
 
   function extractStructuredExifSummary(doc) {
@@ -809,12 +1023,23 @@
       return "";
     };
 
-    const camera = formatCamera(get("Camera Make", "Make"), get("Camera Model", "Model"));
+    return formatExifSummary(
+      get("Camera Make", "Make"),
+      get("Camera Model", "Model"),
+      get("Exposure", "Exposure Time", "Shutter Speed"),
+      get("Aperture", "F Number", "F-Number"),
+      get("ISO", "ISO Speed"),
+      get("Focal Length")
+    );
+  }
+
+  function formatExifSummary(make, model, exposure, aperture, iso, focal) {
+    const camera = formatCamera(make, model);
     const settings = [
-      formatExposure(get("Exposure", "Exposure Time", "Shutter Speed")),
-      formatAperture(get("Aperture", "F Number", "F-Number")),
-      formatIso(get("ISO", "ISO Speed")),
-      formatFocalLength(get("Focal Length"))
+      formatExposure(exposure),
+      formatAperture(aperture),
+      formatIso(iso),
+      formatFocalLength(focal)
     ].filter(Boolean);
 
     return [camera, ...settings].filter(Boolean).join(" \u00b7 ");
